@@ -4,6 +4,8 @@ Gemma 3n Model Handler with multimodal support
 import os
 import time
 import asyncio
+import threading
+import queue
 import torch
 from typing import Dict, List, Any, Optional, Union, AsyncGenerator, TYPE_CHECKING
 
@@ -417,23 +419,82 @@ class GemmaModelHandler:
     async def _generate_stream(
         self, inputs, input_len, max_tokens, temperature, top_p, top_k, **kwargs
     ) -> AsyncGenerator[str, None]:
-        """Generate streaming response"""
-        # For now, implement pseudo-streaming by yielding chunks
-        # Real streaming would require custom generation loop
-        complete_response = await self._generate_complete(
-            inputs, input_len, max_tokens, temperature, top_p, top_k, **kwargs
-        )
+        """Generate streaming response token by token"""
+        import threading
+        import queue
         
-        # Yield response in chunks
-        words = complete_response.split()
-        chunk_size = max(1, len(words) // 10)  # 10 chunks
+        # Queue for streaming tokens
+        token_queue = queue.Queue()
         
-        for i in range(0, len(words), chunk_size):
-            chunk = " ".join(words[i:i + chunk_size])
-            if i + chunk_size < len(words):
-                chunk += " "
-            yield chunk
-            await asyncio.sleep(0.1)  # Small delay for streaming effect
+        def generation_thread():
+            """Run generation in separate thread"""
+            try:
+                with torch.inference_mode():
+                    # Use TextIteratorStreamer for real streaming
+                    from transformers.generation.streamers import TextIteratorStreamer
+                    
+                    streamer = TextIteratorStreamer(
+                        self.processor.tokenizer,  # type: ignore
+                        skip_prompt=True,
+                        skip_special_tokens=True,
+                        timeout=30.0
+                    )
+                    
+                    generation_kwargs = {
+                        **inputs,
+                        "max_new_tokens": max_tokens,
+                        "do_sample": True,
+                        "top_k": top_k,
+                        "top_p": top_p,
+                        "temperature": temperature,
+                        "pad_token_id": self.processor.tokenizer.eos_token_id,  # type: ignore
+                        "use_cache": True,
+                        "streamer": streamer,
+                        **kwargs
+                    }
+                    
+                    # Start generation in background
+                    thread = threading.Thread(
+                        target=self.model.generate,  # type: ignore
+                        kwargs=generation_kwargs
+                    )
+                    thread.start()
+                    
+                    # Stream tokens as they're generated
+                    for new_text in streamer:
+                        if new_text:
+                            token_queue.put(new_text)
+                    
+                    # Signal end of generation
+                    token_queue.put(None)
+                    thread.join()
+                    
+            except Exception as e:
+                logger.error(f"Error in streaming generation: {e}")
+                token_queue.put(None)
+        
+        # Start generation thread
+        gen_thread = threading.Thread(target=generation_thread)
+        gen_thread.start()
+        
+        # Yield tokens as they arrive
+        try:
+            while True:
+                # Wait for next token with timeout
+                try:
+                    token = token_queue.get(timeout=1.0)
+                    if token is None:  # End of generation
+                        break
+                    yield token
+                    # Small delay to prevent overwhelming the client
+                    await asyncio.sleep(0.01)
+                except queue.Empty:
+                    # Continue waiting
+                    continue
+        finally:
+            # Ensure thread cleanup
+            if gen_thread.is_alive():
+                gen_thread.join(timeout=5.0)
     
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about current model"""
