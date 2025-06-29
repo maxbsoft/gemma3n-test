@@ -1,0 +1,18 @@
+# Core dependencies - actually used in the project
+transformers>=4.53.0     # Gemma 3n support (required for google/gemma-3n models)
+torch>=2.1.0            # GPU support and optimizations
+Pillow>=9.0.0           # Image processing (PIL import)
+requests>=2.28.0        # HTTP requests for image URLs
+python-dotenv>=1.0.0    # Environment variables (.env file)
+numpy>=1.21.0           # Numerical computations
+
+# Quantization support (for unsloth quantized models)
+bitsandbytes>=0.41.0    # 4-bit quantization support
+
+# Optional but recommended dependencies
+accelerate>=0.20.0      # Faster model loading and training
+safetensors>=0.3.0      # Safe tensor serialization
+timm>=0.9.0            # Vision models (MobileNet-v5 for Gemma 3n)
+
+# Development and performance
+datasets>=2.12.0        # For potential dataset loading 
