@@ -21,6 +21,9 @@ import requests
 import logging
 import sys
 from pathlib import Path
+import cv2
+import numpy as np
+import tempfile
 sys.path.append(str(Path(__file__).parent.parent))
 
 from config import ModelConfig, config, GENERATION_PRESETS
@@ -111,8 +114,27 @@ class GemmaModelHandler:
             
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                torch.cuda.synchronize()  # Ensure all operations complete
             
             logger.info("Model unloaded and memory cleared")
+    
+    def force_cleanup_gpu_memory(self):
+        """Force cleanup of GPU memory"""
+        logger.warning("Force cleaning GPU memory...")
+        
+        if torch.cuda.is_available():
+            # Clear all caches
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()  # Clean up shared memory
+            torch.cuda.synchronize()
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            
+            gpu_memory_after = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+            gpu_memory_after_gb = gpu_memory_after / (1024**3)
+            logger.info(f"GPU memory after cleanup: {gpu_memory_after_gb:.2f} GB available")
     
     def _process_image_content(self, content: Dict[str, Any]) -> Image.Image:
         """Process image from various sources"""
@@ -156,15 +178,83 @@ class GemmaModelHandler:
         else:
             raise ValueError("Audio content must have 'audio' or 'url' field")
     
-    def _process_video_content(self, content: Dict[str, Any]) -> str:
-        """Process video from various sources"""
+    def _process_video_content(self, content: Dict[str, Any]) -> List[Image.Image]:
+        """Process video from various sources and extract frames"""
         if "url" in content:
-            # Video URL
             video_url = content["url"]
             logger.info(f"Processing video URL: {video_url}")
-            return video_url
+            
+            # Download video to temporary file
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.get(video_url, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            # Save to temporary file
+            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_file:
+                temp_file.write(response.content)
+                temp_path = temp_file.name
+            
+            try:
+                # Extract frames using OpenCV
+                frames = self._extract_video_frames(temp_path)
+                logger.info(f"Extracted {len(frames)} frames from video")
+                return frames
+            finally:
+                # Clean up temporary file
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
         else:
             raise ValueError("Video content must have 'url' field")
+    
+    def _extract_video_frames(self, video_path: str, max_frames: int = 10) -> List[Image.Image]:
+        """Extract frames from video file"""
+        frames = []
+        
+        # Open video with OpenCV
+        cap = cv2.VideoCapture(video_path)
+        
+        try:
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            duration = total_frames / fps if fps > 0 else 0
+            
+            logger.info(f"Video info: {total_frames} frames, {fps:.2f} fps, {duration:.2f}s")
+            
+            # Calculate frame interval to get evenly distributed frames
+            if total_frames <= max_frames:
+                frame_interval = 1
+            else:
+                frame_interval = total_frames // max_frames
+            
+            frame_count = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # Take every nth frame
+                if frame_count % frame_interval == 0 and len(frames) < max_frames:
+                    # Convert BGR to RGB
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    
+                    # Convert to PIL Image
+                    pil_image = Image.fromarray(frame_rgb)
+                    
+                    # Resize if too large
+                    max_size = config.MAX_IMAGE_SIZE
+                    if max(pil_image.size) > max_size:
+                        pil_image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+                    
+                    frames.append(pil_image)
+                
+                frame_count += 1
+            
+        finally:
+            cap.release()
+        
+        return frames
     
     def _prepare_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Convert OpenAI-style messages to Gemma format"""
@@ -194,13 +284,31 @@ class GemmaModelHandler:
                     elif item["type"] == "audio":
                         # Process audio
                         audio_url = self._process_audio_content(item)
-                        processed_content.append({"type": "audio", "url": audio_url})
+                        processed_content.append({"type": "audio", "audio": audio_url})
                     elif item["type"] == "video":
-                        # Process video
-                        video_url = self._process_video_content(item)
-                        video_content = {"type": "video", "url": video_url}
-                        logger.info(f"Adding video content: {video_content}")
-                        processed_content.append(video_content)
+                        # Check GPU memory before processing video
+                        if torch.cuda.is_available():
+                            gpu_memory_free = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+                            gpu_memory_free_gb = gpu_memory_free / (1024**3)
+                            logger.info(f"Free GPU memory before video processing: {gpu_memory_free_gb:.2f} GB")
+                            
+                            if gpu_memory_free_gb < 2.0:  # Need at least 2GB free
+                                logger.warning("Low GPU memory, clearing cache before video processing")
+                                torch.cuda.empty_cache()
+                        
+                        # Process video - extract frames and add as images
+                        video_frames = self._process_video_content(item)
+                        logger.info(f"Adding {len(video_frames)} video frames as images")
+                        
+                        # Add each frame as an image
+                        for i, frame in enumerate(video_frames):
+                            frame_content = {"type": "image", "image": frame}
+                            processed_content.append(frame_content)
+                        
+                        # Clear GPU cache after processing video
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            logger.info("Cleared GPU cache after video processing")
                 
                 processed_messages.append({
                     "role": role,
@@ -226,6 +334,23 @@ class GemmaModelHandler:
         """
         if self.model is None:
             raise ValueError("No model loaded. Call load_model() first.")
+        
+        # Check GPU memory at start
+        if torch.cuda.is_available():
+            gpu_memory_free = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+            gpu_memory_free_gb = gpu_memory_free / (1024**3)
+            logger.info(f"Available GPU memory: {gpu_memory_free_gb:.2f} GB")
+            
+            if gpu_memory_free_gb < 1.0:  # Critical memory low
+                logger.error(f"GPU memory critically low: {gpu_memory_free_gb:.2f} GB available")
+                torch.cuda.empty_cache()
+                
+                # Recheck after cache clear
+                gpu_memory_free = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+                gpu_memory_free_gb = gpu_memory_free / (1024**3)
+                
+                if gpu_memory_free_gb < 0.5:
+                    raise RuntimeError(f"Insufficient GPU memory: {gpu_memory_free_gb:.2f} GB available, need at least 0.5 GB")
         
         # Set default parameters
         max_tokens = max_tokens or config.DEFAULT_MAX_TOKENS

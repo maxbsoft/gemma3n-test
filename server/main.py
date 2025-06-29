@@ -121,13 +121,15 @@ async def root():
             "chat_completions": "/v1/chat/completions",
             "models": "/v1/models",
             "health": "/v1/health",
-            "status": "/v1/status"
+            "status": "/v1/status",
+            "gpu_cleanup": "/v1/gpu/cleanup"
         },
         "features": [
-            "Multimodal support (text + images)",
+            "Multimodal support (text + images + video)",
             "Model switching",
-            "Streaming responses",
+            "Streaming responses", 
             "Generation presets",
+            "GPU memory management",
             "OpenAI compatibility"
         ]
     }
@@ -157,10 +159,12 @@ async def get_info():
         },
         "supported_features": [
             "Text generation",
-            "Image understanding", 
+            "Image understanding",
+            "Video analysis (frame extraction)", 
             "Multimodal conversations",
             "Streaming responses",
-            "Model hot-swapping"
+            "Model hot-swapping",
+            "GPU memory management"
         ]
     }
 

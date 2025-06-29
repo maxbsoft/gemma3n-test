@@ -174,6 +174,27 @@ async def unload_model():
         logger.error(f"Error unloading model: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/gpu/cleanup")
+async def cleanup_gpu_memory():
+    """Force cleanup of GPU memory"""
+    try:
+        model_handler.force_cleanup_gpu_memory()
+        
+        # Get memory status after cleanup
+        if torch.cuda.is_available():
+            gpu_memory_free = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+            gpu_memory_free_gb = gpu_memory_free / (1024**3)
+            return {
+                "success": True, 
+                "message": "GPU memory cleaned up successfully",
+                "free_memory_gb": round(gpu_memory_free_gb, 2)
+            }
+        else:
+            return {"success": True, "message": "No GPU available"}
+    except Exception as e:
+        logger.error(f"Error cleaning up GPU memory: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/models/current")
 async def get_current_model():
     """Get information about currently loaded model"""
@@ -242,6 +263,6 @@ async def get_server_config():
         "default_model": config.DEFAULT_MODEL,
         "max_tokens_per_request": config.MAX_TOKENS_PER_REQUEST,
         "max_concurrent_requests": config.MAX_CONCURRENT_REQUESTS,
-        "supported_modalities": ["text", "image"],  # Add video, audio when implemented
+        "supported_modalities": ["text", "image", "video", "audio"],
         "gpu_available": torch.cuda.is_available() 
     } 
