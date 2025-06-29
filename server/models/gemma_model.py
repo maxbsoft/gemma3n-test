@@ -14,7 +14,6 @@ else:
     ProcessorType = Any
     ModelType = Any
 from transformers import AutoProcessor, Gemma3nForConditionalGeneration  # type: ignore
-from transformers.models import GenerationConfig
 from PIL import Image
 import io
 import base64
@@ -119,7 +118,11 @@ class GemmaModelHandler:
         """Process image from various sources"""
         if "url" in content:
             # Load from URL
-            response = requests.get(content["url"])
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            response = requests.get(content["url"], headers=headers, timeout=10)
+            response.raise_for_status()
             image = Image.open(io.BytesIO(response.content))
         elif "image" in content:
             # Direct PIL Image
@@ -130,6 +133,10 @@ class GemmaModelHandler:
             image = Image.open(io.BytesIO(image_data))
         else:
             raise ValueError("Image content must have 'url', 'image', or 'base64' field")
+        
+        # Convert to RGB if necessary
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
         
         # Resize if too large
         max_size = config.MAX_IMAGE_SIZE
