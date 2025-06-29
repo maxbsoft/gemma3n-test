@@ -12,6 +12,7 @@ class MessageContent(BaseModel):
     text: Optional[str] = None
     url: Optional[str] = None
     base64: Optional[str] = None
+    audio: Optional[str] = None  # For direct audio URL (Gemma format)
     
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant", "system"]

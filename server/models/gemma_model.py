@@ -145,6 +145,27 @@ class GemmaModelHandler:
         
         return image
     
+    def _process_audio_content(self, content: Dict[str, Any]) -> str:
+        """Process audio from various sources"""
+        if "audio" in content:
+            # Direct audio URL (Gemma format)
+            return content["audio"]
+        elif "url" in content:
+            # Audio URL in url field
+            return content["url"]
+        else:
+            raise ValueError("Audio content must have 'audio' or 'url' field")
+    
+    def _process_video_content(self, content: Dict[str, Any]) -> str:
+        """Process video from various sources"""
+        if "url" in content:
+            # Video URL
+            video_url = content["url"]
+            logger.info(f"Processing video URL: {video_url}")
+            return video_url
+        else:
+            raise ValueError("Video content must have 'url' field")
+    
     def _prepare_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Convert OpenAI-style messages to Gemma format"""
         processed_messages = []
@@ -170,13 +191,23 @@ class GemmaModelHandler:
                         # Process image
                         image = self._process_image_content(item)
                         processed_content.append({"type": "image", "image": image})
-                    # Add support for other modalities here (video, audio)
+                    elif item["type"] == "audio":
+                        # Process audio
+                        audio_url = self._process_audio_content(item)
+                        processed_content.append({"type": "audio", "url": audio_url})
+                    elif item["type"] == "video":
+                        # Process video
+                        video_url = self._process_video_content(item)
+                        video_content = {"type": "video", "url": video_url}
+                        logger.info(f"Adding video content: {video_content}")
+                        processed_content.append(video_content)
                 
                 processed_messages.append({
                     "role": role,
                     "content": processed_content
                 })
         
+        logger.info(f"Final processed messages: {processed_messages}")
         return processed_messages
     
     async def generate_response(

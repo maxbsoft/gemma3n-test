@@ -10,6 +10,8 @@ torch>=2.1.0
 accelerate>=0.20.0
 bitsandbytes>=0.41.0
 safetensors>=0.3.0
+timm>=0.9.0
+av>=14.0.0
 
 # Multimodal support
 Pillow>=9.0.0

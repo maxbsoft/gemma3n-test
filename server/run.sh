@@ -55,6 +55,43 @@ while [[ $# -gt 0 ]]; do
             LOG_LEVEL="debug"
             shift
             ;;
+        --stop)
+            echo "Stopping server..."
+            PID_FILE="logs/server.pid"
+            if [ -f "$PID_FILE" ]; then
+                PID=$(cat "$PID_FILE")
+                if kill -0 "$PID" 2>/dev/null; then
+                    echo "Killing process $PID"
+                    kill -TERM "$PID"
+                    rm -f "$PID_FILE"
+                    echo "✅ Server stopped"
+                else
+                    echo "⚠️  Process $PID not found, removing stale PID file"
+                    rm -f "$PID_FILE"
+                fi
+            else
+                echo "⚠️  PID file not found. Checking for running processes..."
+                pkill -f "start_server.py" && echo "✅ Server stopped" || echo "❌ No server process found"
+            fi
+            exit 0
+            ;;
+        --status)
+            PID_FILE="logs/server.pid"
+            if [ -f "$PID_FILE" ]; then
+                PID=$(cat "$PID_FILE")
+                if kill -0 "$PID" 2>/dev/null; then
+                    echo "✅ Server is running (PID: $PID)"
+                    echo "📊 Server status:"
+                    curl -s http://localhost:$PORT/v1/health | python3 -m json.tool 2>/dev/null || echo "❌ Server not responding"
+                else
+                    echo "❌ Server not running (stale PID file)"
+                    rm -f "$PID_FILE"
+                fi
+            else
+                echo "❌ Server not running"
+            fi
+            exit 0
+            ;;
         --help|-h)
             echo "Usage: $0 [options]"
             echo ""
@@ -65,6 +102,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --workers N         Number of workers (default: 1)"
             echo "  --dev, --reload     Enable development mode with auto-reload"
             echo "  --debug             Enable debug logging"
+            echo "  --stop              Stop the server"
+            echo "  --status            Check server status"
             echo "  --help, -h          Show this help message"
             echo ""
             echo "Available models:"
@@ -77,6 +116,8 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --model gemma-3n-e4b-full         # Use E4B model"
             echo "  $0 --dev                              # Development mode"
             echo "  $0 --port 8080 --debug               # Custom port with debug"
+            echo "  $0 --stop                             # Stop server"
+            echo "  $0 --status                           # Check status"
             exit 0
             ;;
         *)
