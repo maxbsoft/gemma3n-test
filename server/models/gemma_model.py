@@ -1,0 +1,297 @@
+"""
+Gemma 3n Model Handler with multimodal support
+"""
+import os
+import time
+import asyncio
+import torch
+from typing import Dict, List, Any, Optional, Union, AsyncGenerator, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers import AutoProcessor as ProcessorType
+    from transformers.modeling_utils import PreTrainedModel as ModelType
+else:
+    ProcessorType = Any
+    ModelType = Any
+from transformers import AutoProcessor, Gemma3nForConditionalGeneration  # type: ignore
+from transformers.models import GenerationConfig
+from PIL import Image
+import io
+import base64
+import requests
+import logging
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+
+from config import ModelConfig, config, GENERATION_PRESETS
+
+logger = logging.getLogger(__name__)
+
+class GemmaModelHandler:
+    """
+    Handler for Gemma 3n models with OpenAI-compatible interface
+    """
+    
+    def __init__(self):
+        self.model: Optional[ModelType] = None
+        self.processor: Optional[ProcessorType] = None
+        self.current_model_name = None
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model_config = None
+        
+        # Optimization settings
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision('high')
+        
+    async def load_model(self, model_name: str) -> bool:
+        """
+        Load specified model asynchronously
+        """
+        if self.current_model_name == model_name and self.model is not None:
+            logger.info(f"Model {model_name} already loaded")
+            return True
+            
+        try:
+            logger.info(f"Loading model: {model_name}")
+            self.model_config = ModelConfig.get_model_config(model_name)
+            
+            if not config.HF_TOKEN:
+                raise ValueError("HF_TOKEN not found in environment variables")
+            
+            start_time = time.time()
+            
+            # Load model in separate thread to avoid blocking
+            loop = asyncio.get_event_loop()
+            self.model, self.processor = await loop.run_in_executor(
+                None, self._load_model_sync, self.model_config
+            )
+            
+            load_time = time.time() - start_time
+            self.current_model_name = model_name
+            
+            # Log GPU memory usage
+            if torch.cuda.is_available():
+                memory_allocated = torch.cuda.memory_allocated() / 1024**3
+                logger.info(f"Model {model_name} loaded in {load_time:.2f}s")
+                logger.info(f"GPU Memory allocated: {memory_allocated:.2f} GB")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to load model {model_name}: {e}")
+            return False
+    
+    def _load_model_sync(self, model_config: Dict[str, Any]):
+        """Synchronous model loading"""
+        model = Gemma3nForConditionalGeneration.from_pretrained(
+            model_config["model_id"],
+            device_map=model_config.get("device_map", "auto"),
+            torch_dtype=getattr(torch, model_config.get("torch_dtype", "bfloat16")),
+            token=config.HF_TOKEN,
+            low_cpu_mem_usage=model_config.get("low_cpu_mem_usage", True),
+            trust_remote_code=model_config.get("trust_remote_code", False)
+        ).eval()
+        
+        processor = AutoProcessor.from_pretrained(
+            model_config["model_id"], 
+            token=config.HF_TOKEN
+        )
+        
+        return model, processor
+    
+    def unload_model(self):
+        """Unload current model to free memory"""
+        if self.model is not None:
+            del self.model
+            del self.processor
+            self.model = None
+            self.processor = None
+            self.current_model_name = None
+            
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            logger.info("Model unloaded and memory cleared")
+    
+    def _process_image_content(self, content: Dict[str, Any]) -> Image.Image:
+        """Process image from various sources"""
+        if "url" in content:
+            # Load from URL
+            response = requests.get(content["url"])
+            image = Image.open(io.BytesIO(response.content))
+        elif "image" in content:
+            # Direct PIL Image
+            image = content["image"]
+        elif "base64" in content:
+            # Base64 encoded image
+            image_data = base64.b64decode(content["base64"])
+            image = Image.open(io.BytesIO(image_data))
+        else:
+            raise ValueError("Image content must have 'url', 'image', or 'base64' field")
+        
+        # Resize if too large
+        max_size = config.MAX_IMAGE_SIZE
+        if max(image.size) > max_size:
+            image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        
+        return image
+    
+    def _prepare_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert OpenAI-style messages to Gemma format"""
+        processed_messages = []
+        
+        for message in messages:
+            role = message["role"]
+            content = message["content"]
+            
+            if isinstance(content, str):
+                # Simple text message
+                processed_messages.append({
+                    "role": role,
+                    "content": [{"type": "text", "text": content}]
+                })
+            elif isinstance(content, list):
+                # Multi-part content (text + images)
+                processed_content = []
+                
+                for item in content:
+                    if item["type"] == "text":
+                        processed_content.append(item)
+                    elif item["type"] == "image":
+                        # Process image
+                        image = self._process_image_content(item)
+                        processed_content.append({"type": "image", "image": image})
+                    # Add support for other modalities here (video, audio)
+                
+                processed_messages.append({
+                    "role": role,
+                    "content": processed_content
+                })
+        
+        return processed_messages
+    
+    async def generate_response(
+        self,
+        messages: List[Dict[str, Any]],
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        stream: bool = False,
+        preset: Optional[str] = None,
+        **kwargs
+    ) -> Union[str, AsyncGenerator[str, None]]:
+        """
+        Generate response with OpenAI-compatible parameters
+        """
+        if self.model is None:
+            raise ValueError("No model loaded. Call load_model() first.")
+        
+        # Set default parameters
+        max_tokens = max_tokens or config.DEFAULT_MAX_TOKENS
+        temperature = temperature if temperature is not None else config.DEFAULT_TEMPERATURE
+        top_p = top_p if top_p is not None else config.DEFAULT_TOP_P
+        top_k = top_k if top_k is not None else config.DEFAULT_TOP_K
+        
+        # Apply preset if specified
+        if preset and preset in GENERATION_PRESETS:
+            preset_params = GENERATION_PRESETS[preset]
+            temperature = preset_params.get("temperature", temperature)
+            top_p = preset_params.get("top_p", top_p)
+            top_k = preset_params.get("top_k", top_k)
+        
+        # Prepare messages
+        processed_messages = self._prepare_messages(messages)
+        
+        # Tokenize input
+        inputs = self.processor.apply_chat_template(  # type: ignore
+            processed_messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(self.model.device, dtype=torch.bfloat16)
+        
+        input_len = inputs["input_ids"].shape[-1]
+        
+        if stream:
+            return self._generate_stream(inputs, input_len, max_tokens, temperature, top_p, top_k, **kwargs)
+        else:
+            return await self._generate_complete(inputs, input_len, max_tokens, temperature, top_p, top_k, **kwargs)
+    
+    async def _generate_complete(
+        self, inputs, input_len, max_tokens, temperature, top_p, top_k, **kwargs
+    ) -> str:
+        """Generate complete response"""
+        start_time = time.time()
+        
+        with torch.inference_mode():
+            generation = self.model.generate(  # type: ignore
+                **inputs,
+                max_new_tokens=max_tokens,
+                do_sample=True,
+                top_k=top_k,
+                top_p=top_p,
+                temperature=temperature,
+                pad_token_id=self.processor.tokenizer.eos_token_id,  # type: ignore
+                use_cache=True,
+                **kwargs
+            )
+            
+            generation = generation[0][input_len:]
+        
+        generation_time = time.time() - start_time
+        decoded = self.processor.decode(generation, skip_special_tokens=True)  # type: ignore
+        
+        # Log performance metrics
+        tokens_per_second = len(generation) / generation_time if generation_time > 0 else 0
+        logger.info(f"Generated {len(generation)} tokens in {generation_time:.2f}s ({tokens_per_second:.1f} tok/s)")
+        
+        return decoded
+    
+    async def _generate_stream(
+        self, inputs, input_len, max_tokens, temperature, top_p, top_k, **kwargs
+    ) -> AsyncGenerator[str, None]:
+        """Generate streaming response"""
+        # For now, implement pseudo-streaming by yielding chunks
+        # Real streaming would require custom generation loop
+        complete_response = await self._generate_complete(
+            inputs, input_len, max_tokens, temperature, top_p, top_k, **kwargs
+        )
+        
+        # Yield response in chunks
+        words = complete_response.split()
+        chunk_size = max(1, len(words) // 10)  # 10 chunks
+        
+        for i in range(0, len(words), chunk_size):
+            chunk = " ".join(words[i:i + chunk_size])
+            if i + chunk_size < len(words):
+                chunk += " "
+            yield chunk
+            await asyncio.sleep(0.1)  # Small delay for streaming effect
+    
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about current model"""
+        if self.current_model_name is None:
+            return {"status": "no_model_loaded"}
+        
+        info = {
+            "model_name": self.current_model_name,
+            "model_id": self.model_config["model_id"],  # type: ignore
+            "quantization": self.model_config.get("quantization"),  # type: ignore
+            "estimated_vram": self.model_config.get("estimated_vram"),  # type: ignore
+            "expected_speed": self.model_config.get("expected_speed"),  # type: ignore
+            "device": str(self.device)
+        }
+        
+        if torch.cuda.is_available():
+            info["gpu_name"] = torch.cuda.get_device_name()
+            info["gpu_memory_allocated"] = f"{torch.cuda.memory_allocated() / 1024**3:.2f} GB"
+            info["gpu_memory_reserved"] = f"{torch.cuda.memory_reserved() / 1024**3:.2f} GB"
+        
+        return info
+
+# Global model handler instance
+model_handler = GemmaModelHandler() 
