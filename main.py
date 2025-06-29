@@ -1,7 +1,7 @@
 import os
 import time
 import torch
-from transformers import AutoProcessor, Gemma3nForConditionalGeneration
+from transformers import AutoProcessor, Gemma3nForConditionalGeneration # type: ignore
 from PIL import Image
 import requests
 from dotenv import load_dotenv
@@ -63,13 +63,13 @@ class Gemma3nTester:
     def generate_with_speed_test(self, messages, max_new_tokens=200, use_sampling=True):
         """Generate text with proper sampling parameters and speed measurement"""
         
-        inputs = self.processor.apply_chat_template(
+        inputs = self.processor.apply_chat_template( # type: ignore
             messages,
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-        ).to(self.model.device, dtype=torch.bfloat16)
+        ).to(self.model.device, dtype=torch.bfloat16) # type: ignore
         
         input_len = inputs["input_ids"].shape[-1]
         
@@ -90,7 +90,7 @@ class Gemma3nTester:
                 #     use_cache=True
                 # )
 
-                generation = self.model.generate(
+                generation = self.model.generate( # type: ignore
                     **inputs,
                     # attention_mask=inputs.get("attention_mask", None),
                     max_new_tokens=max_new_tokens,
@@ -113,7 +113,7 @@ class Gemma3nTester:
                 #     use_cache=True
                 # )
 
-                generation = self.model.generate(
+                generation = self.model.generate( # type: ignore
                     **inputs,
                     # attention_mask=inputs.get("attention_mask", None),
                     max_new_tokens=max_new_tokens,
@@ -131,7 +131,7 @@ class Gemma3nTester:
         generation_time = time.time() - start_time
         output_tokens = len(generation)
         
-        decoded = self.processor.decode(generation, skip_special_tokens=True)
+        decoded = self.processor.decode(generation, skip_special_tokens=True) # type: ignore
         tokens_per_second = output_tokens / generation_time if generation_time > 0 else 0
         
         return decoded, tokens_per_second, generation_time, output_tokens
@@ -164,19 +164,19 @@ class Gemma3nTester:
         return tokens_per_second
     
     def test_text_ukrainian(self):
-        """Test 2: Ukrainian text generation"""
+        """Test 2: Ukrainian language support test"""
         print("=" * 60)
-        print("TEST 2: UKRAINIAN TEXT GENERATION")
+        print("TEST 2: UKRAINIAN LANGUAGE SUPPORT")
         print("=" * 60)
         
         messages = [
             {
                 "role": "user",
-                "content": [{"type": "text", "text": "Розкажи коротку історію про космічного мандрівника, який знайшов нову планету. Пиши українською мовою."}]
+                "content": [{"type": "text", "text": "Write a short story about a space traveler who discovered a new planet. Please respond in Ukrainian language."}]
             }
         ]
         
-        print("Prompt: Tell a short story about a space traveler who found a new planet (in Ukrainian)")
+        print("Prompt: Write a short story about a space traveler who discovered a new planet (requesting Ukrainian response)")
         
         decoded, tokens_per_second, generation_time, output_tokens = self.generate_with_speed_test(
             messages, max_new_tokens=200, use_sampling=True
@@ -207,7 +207,7 @@ class Gemma3nTester:
                         for i in range(10):
                             for j in range(10):
                                 if x + i < size[0] and y + j < size[1]:
-                                    pixels[x + i, y + j] = (255, 255, 255)
+                                    pixels[x + i, y + j] = (255, 255, 255) # type: ignore
             
             img.save("test_image.png")
             print("Test image created!")

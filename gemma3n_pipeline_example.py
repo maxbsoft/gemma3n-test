@@ -40,7 +40,7 @@ messages = [
 ]
 
 print("Generating response...")
-output = pipe(messages, max_new_tokens=32)
+output = pipe(messages, max_new_tokens=32) # type: ignore
 print("\nResult:")
 print(output[0]["generated_text"][-1]["content"])
 
@@ -57,6 +57,6 @@ text_messages = [
     }
 ]
 
-text_output = pipe(text_messages, max_new_tokens=50)
+text_output = pipe(text_messages, max_new_tokens=50) # type: ignore
 print("Text generation result:")
 print(text_output[0]["generated_text"][-1]["content"]) 
